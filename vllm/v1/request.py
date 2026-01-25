@@ -137,6 +137,9 @@ class Request:
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
 
+        # Added for adaptive speculative decoding strategy
+        self.spec_decode_mode: str | None = None
+
     @classmethod
     def from_engine_core_request(
         cls,

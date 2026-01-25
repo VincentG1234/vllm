@@ -250,6 +250,40 @@ class Scheduler(SchedulerInterface):
                 vllm_config=self.vllm_config,
             )
 
+        # Added for adaptive speculative decoding strategy
+        self.spec_decode_enabled_for_new_requests = True
+
+    def _update_spec_decode_state(self):
+        spec_config = self.vllm_config.speculative_config
+
+        if spec_config is None or spec_config.disable_by_batch_size is None:
+            self.spec_decode_enabled_for_new_requests = True
+            return
+
+        total_load = len(self.running) + len(self.waiting)
+        threshold = spec_config.disable_by_batch_size
+
+        # Hysteresis
+        if total_load >= threshold:
+            self.spec_decode_enabled_for_new_requests = False
+        elif total_load < int(threshold * 0.8):
+            self.spec_decode_enabled_for_new_requests = True
+
+    def _assign_spec_decode_mode(self, request: Request):
+        if request.spec_decode_mode is None:
+            if self.spec_decode_enabled_for_new_requests:
+                request.spec_decode_mode = "enabled"
+            else:
+                request.spec_decode_mode = "disabled"
+
+    def _should_use_spec_decode_for_request(self, request: Request) -> bool:
+        # Prefill never uses speculative decoding
+        if request.num_computed_tokens == 0:
+            return False
+
+        # Respect assigned mode
+        return request.spec_decode_mode != "disabled"
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -261,6 +295,9 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+
+        # Update spec decode state based on current load
+        self._update_spec_decode_state()
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -427,7 +464,10 @@ class Scheduler(SchedulerInterface):
                     - request.num_tokens
                     - request.num_output_placeholders
                 )
-                if num_scheduled_spec_tokens > 0:
+                if (
+                    num_scheduled_spec_tokens > 0
+                    and self._should_use_spec_decode_for_request(request)
+                ):
                     # Trim spec_token_ids list to num_scheduled_spec_tokens.
                     del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
@@ -522,6 +562,9 @@ class Scheduler(SchedulerInterface):
                 num_external_computed_tokens = 0
                 load_kv_async = False
 
+                # Assign spec decode mode for new request
+                self._assign_spec_decode_mode(request)
+
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
@@ -614,7 +657,12 @@ class Scheduler(SchedulerInterface):
                 # creates a mismatch between the number
                 # of local and remote blocks.
                 effective_lookahead_tokens = (
-                    0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
+                    0
+                    if (
+                        request.num_computed_tokens == 0
+                        or not self._should_use_spec_decode_for_request(request)
+                    )
+                    else self.num_lookahead_tokens
                 )
 
                 num_encoder_tokens = (

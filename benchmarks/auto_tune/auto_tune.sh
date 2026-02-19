@@ -1,23 +1,72 @@
 #!/bin/bash
 
+# ============================================================================
+# DEPRECATED: This bash script is deprecated in favor of the Python toolkit.
+# ============================================================================
+# 
+# Please use the new Python-based auto-tuning tool instead:
+#   python autotune.py --config tune.yaml
+#
+# The new tool provides:
+#   - YAML-driven configuration
+#   - Better error handling and logging
+#   - Structured JSONL results
+#   - Easier extensibility
+#
+# This bash script is kept for backward compatibility but may be removed
+# in a future version. To use the old bash script, set USE_LEGACY_BASH=1
+#
+# ============================================================================
+
 # This script aims to tune the best server parameter combinations to maximize throughput for given requirement.
 # See details in README (benchmarks/auto_tune/README.md).
+
+# Check if user wants to use legacy bash script
+if [[ -z "$USE_LEGACY_BASH" ]]; then
+    echo "============================================================================" >&2
+    echo "WARNING: This bash script is deprecated." >&2
+    echo "============================================================================" >&2
+    echo "" >&2
+    echo "Please use the new Python-based auto-tuning tool:" >&2
+    echo "  python autotune.py --config tune.yaml" >&2
+    echo "" >&2
+    echo "To continue using this legacy bash script, set:" >&2
+    echo "  export USE_LEGACY_BASH=1" >&2
+    echo "" >&2
+    echo "Attempting to call Python version instead..." >&2
+    echo "============================================================================" >&2
+    
+    SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+    PYTHON_SCRIPT="$SCRIPT_DIR/autotune.py"
+    
+    if [[ -f "$PYTHON_SCRIPT" ]]; then
+        # Try to convert environment variables to a tune.yaml or use defaults
+        python3 "$PYTHON_SCRIPT" --config "${TUNE_YAML:-$SCRIPT_DIR/tune.yaml}" "$@"
+        exit $?
+    else
+        echo "Error: Python script not found at $PYTHON_SCRIPT" >&2
+        echo "Falling back to legacy bash script..." >&2
+        echo "" >&2
+    fi
+fi
 
 TAG=$(date +"%Y_%m_%d_%H_%M")
 SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL:-INFO}
 BASE=${BASE:-"$SCRIPT_DIR/../../.."}
-MODEL=${MODEL:-"meta-llama/Llama-3.1-8B-Instruct"}
-SYSTEM=${SYSTEM:-"TPU"}
+MODEL=${MODEL:-"Qwen/Qwen2.5-3B-Instruct"}
+SYSTEM=${SYSTEM:-"GPU"}
 TP=${TP:-1}
 DOWNLOAD_DIR=${DOWNLOAD_DIR:-""}
 INPUT_LEN=${INPUT_LEN:-4000}
-OUTPUT_LEN=${OUTPUT_LEN:-16}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-4096}
+OUTPUT_LEN=${OUTPUT_LEN:--1}
+PROMPTS_PATH=${PROMPTS_PATH:-"data.jsonl"}            # ex: /path/to/data.jsonl
+SEED=${SEED:-42}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-6196}
 MIN_CACHE_HIT_PCT=${MIN_CACHE_HIT_PCT:-0}
 MAX_LATENCY_ALLOWED_MS=${MAX_LATENCY_ALLOWED_MS:-100000000000}
-NUM_SEQS_LIST=${NUM_SEQS_LIST:-"128 256"}
-NUM_BATCHED_TOKENS_LIST=${NUM_BATCHED_TOKENS_LIST:-"512 1024 2048 4096"}
+NUM_SEQS_LIST=${NUM_SEQS_LIST:-"128"}
+NUM_BATCHED_TOKENS_LIST=${NUM_BATCHED_TOKENS_LIST:-"2048 4096"}
 HOSTNAME=$(hostname)
 if [[ -z "$HOSTNAME" ]]; then
     echo "Error: Failed to determine hostname." >&2
@@ -165,19 +214,39 @@ run_benchmark() {
     bm_log="$LOG_FOLDER/bm_log_${max_num_seqs}_${max_num_batched_tokens}_requestrate_inf.txt"
     prefix_len=$(( INPUT_LEN * MIN_CACHE_HIT_PCT / 100 ))
     adjusted_input_len=$(( INPUT_LEN - prefix_len ))
+
+    dataset_args=()
+    if [[ -n "$PROMPTS_PATH" ]]; then
+        dataset_args+=(
+            --dataset-name custom
+            --dataset-path "$PROMPTS_PATH"
+            --custom-output-len "$OUTPUT_LEN"
+            --seed "$SEED"
+        )
+        # Pour ce 1er incrément: on désactive la simulation de prefix caching côté "random"
+        prefix_len=0
+        adjusted_input_len=$INPUT_LEN
+    else
+        dataset_args+=(
+            --dataset-name random
+            --random-input-len "$adjusted_input_len"
+            --random-output-len "$OUTPUT_LEN"
+            --random-prefix-len "$prefix_len"
+            --seed "$SEED"
+        )
+    fi
+
+
     # --profile flag is removed from this call
     vllm bench serve \
         --backend vllm \
         --model "$MODEL"  \
-        --dataset-name random \
-        --random-input-len $adjusted_input_len \
-        --random-output-len "$OUTPUT_LEN" \
+        "${dataset_args[@]}" \
         --ignore-eos \
         --disable-tqdm \
         --request-rate inf \
         --percentile-metrics ttft,tpot,itl,e2el \
         --goodput e2el:"$MAX_LATENCY_ALLOWED_MS" \
-        --num-prompts 1000 \
         --random-prefix-len $prefix_len \
         --host "$HOSTNAME" \
         --port 8004 &> "$bm_log"
@@ -201,15 +270,13 @@ run_benchmark() {
             vllm bench serve \
                 --backend vllm \
                 --model "$MODEL"  \
-                --dataset-name random \
-                --random-input-len $adjusted_input_len \
-                --random-output-len "$OUTPUT_LEN" \
+                "${dataset_args[@]}" \
                 --ignore-eos \
                 --disable-tqdm \
                 --request-rate $request_rate \
                 --percentile-metrics ttft,tpot,itl,e2el \
                 --goodput e2el:"$MAX_LATENCY_ALLOWED_MS" \
-                --num-prompts 100 \
+                --no-oversample \
                 --random-prefix-len $prefix_len \
                 --host "$HOSTNAME" \
                 --port 8004 &> "$bm_log"
@@ -251,7 +318,7 @@ read -r -a num_seqs_list <<< "$NUM_SEQS_LIST"
 read -r -a num_batched_tokens_list <<< "$NUM_BATCHED_TOKENS_LIST"
 
 # first find out the max gpu-memory-utilization without HBM OOM.
-gpu_memory_utilization=0.98
+gpu_memory_utilization=0.95
 find_gpu_memory_utilization=0
 while (( $(echo "$gpu_memory_utilization >= 0.9" | bc -l) )); do
     # Pass empty string for profile_dir argument
@@ -295,6 +362,26 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
     echo "Starting server for profiling..."
     start_server "$gpu_memory_utilization" "$best_max_num_seqs" "$best_num_batched_tokens" "$vllm_log" "$PROFILE_PATH"
 
+    dataset_args=()
+    if [[ -n "$PROMPTS_PATH" ]]; then
+        dataset_args+=(
+            --dataset-name custom
+            --dataset-path "$PROMPTS_PATH"
+            --custom-output-len "$OUTPUT_LEN"
+            --seed "$SEED"
+        )
+        prefix_len=0
+        adjusted_input_len=$INPUT_LEN
+    else
+        dataset_args+=(
+            --dataset-name random
+            --random-input-len "$adjusted_input_len"
+            --random-output-len "$OUTPUT_LEN"
+            --random-prefix-len "$prefix_len"
+            --seed "$SEED"
+        )
+    fi
+
     # Run benchmark with the best params and the --profile flag
     echo "Running benchmark with profiling..."
     prefix_len=$(( INPUT_LEN * MIN_CACHE_HIT_PCT / 100 ))
@@ -302,15 +389,13 @@ if (( $(echo "$best_throughput > 0" | bc -l) )); then
     vllm bench serve \
         --backend vllm \
         --model "$MODEL" \
-        --dataset-name random \
-        --random-input-len $adjusted_input_len \
-        --random-output-len "$OUTPUT_LEN" \
+        "${dataset_args[@]}" \
         --ignore-eos \
         --disable-tqdm \
         --request-rate "$best_request_rate" \
         --percentile-metrics ttft,tpot,itl,e2el \
         --goodput e2el:"$MAX_LATENCY_ALLOWED_MS" \
-        --num-prompts 100 \
+        --no-oversample \
         --random-prefix-len $prefix_len \
         --host "$HOSTNAME" \
         --port 8004 \

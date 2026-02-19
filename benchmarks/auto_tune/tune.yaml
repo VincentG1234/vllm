@@ -1,0 +1,90 @@
+# vLLM Auto-Tuning Configuration
+# This file defines the model, server, workload, search space, and constraints for auto-tuning.
+
+# Model configuration
+model:
+  name: "Qwen/Qwen2.5-3B-Instruct"
+  tensor_parallel_size: 1
+  download_dir: ""  # Optional: path to model download directory
+  max_model_len: 6196
+
+# Server configuration
+server:
+  host: null  # null means use hostname() - will be auto-detected
+  port: 8004
+  gpu_memory_utilization: null  # null means auto-detect max (starting from 0.95, down to 0.9)
+  # Additional server flags (optional)
+  enable_prefix_caching: true
+  load_format: "dummy"
+  disable_log_requests: true
+
+# Workload configuration
+workload:
+  # Dataset type: "random" or "custom"
+  dataset_type: "random"  # or "custom"
+  
+  # For random dataset:
+  input_len: 4000
+  output_len: -1  # -1 means use model default or dataset default
+  min_cache_hit_pct: 0  # Percentage of input_len to use as prefix cache
+  
+  # For custom dataset:
+  dataset_path: "data.jsonl"  # Path to JSONL file with {"prompt": "...", "output_tokens": ...}
+  
+  # Common options:
+  seed: 42
+  num_prompts: 1000  # Number of prompts to use in benchmark
+  oversample: true  # Whether to oversample the dataset
+
+# Search space - parameters to sweep
+search_space:
+  max_num_seqs: [128]  # List of values to test
+  max_num_batched_tokens: [2048, 4096]  # List of values to test
+  # Future: speculative decoding params (placeholder)
+  # speculative_decoding:
+  #   draft_model: null
+  #   num_draft_tokens: null
+  # Future: joint length sampler (placeholder)
+  # length_sampler:
+  #   type: "joint"  # "joint" or "independent"
+  #   distribution: null
+
+# Constraints - performance requirements
+constraints:
+  max_p99_e2el_ms: 100000000000  # Maximum P99 end-to-end latency in milliseconds
+  # Future: additional constraints
+  # min_throughput: null
+  # max_memory_usage: null
+
+# Search strategy
+strategy:
+  type: "grid"  # Currently only "grid" is supported
+  # Future: "random", "bayesian", etc.
+
+# Objective - what to optimize for
+objective:
+  metric: "throughput"  # "throughput" or "goodput"
+  direction: "maximize"  # "maximize" or "minimize"
+
+# Run controls
+run:
+  # Request rate modes for benchmarking
+  # "auto" - start with inf, then binary search down if latency constraint not met
+  # "fixed" - use a fixed request rate
+  request_rate_mode: "auto"  # "auto" or "fixed"
+  request_rate: null  # Only used if request_rate_mode is "fixed"
+  
+  # Benchmark options
+  percentile_metrics: ["ttft", "tpot", "itl", "e2el"]
+  disable_tqdm: true
+  ignore_eos: true
+  
+  # Profiling: run server + bench with profiling on the best config (like auto_tune.sh)
+  # Set to false to skip this final profiling run.
+  enable_profiling: false
+  profile_dir: null  # Directory for profiling output (default: run_dir/profile)
+
+# Output configuration
+output:
+  base_dir: null  # null means use "runs/<timestamp>" in current directory
+  results_file: "results.jsonl"  # JSONL file with all results

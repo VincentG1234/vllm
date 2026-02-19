@@ -230,8 +230,10 @@ def main():
     print("Finding maximum GPU memory utilization...")
     gpu_memory_utilization = config.server.gpu_memory_utilization
     if gpu_memory_utilization is None:
+        gpu_mem_probe_dir = run_dir / "gpu_mem_probe"
+        gpu_mem_probe_dir.mkdir(parents=True, exist_ok=True)
         gpu_memory_utilization = find_max_gpu_memory_utilization(
-            config, run_dir / "gpu_mem_probe"
+            config, gpu_mem_probe_dir
         )
         if gpu_memory_utilization is None:
             print(

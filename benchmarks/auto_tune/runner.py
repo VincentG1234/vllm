@@ -91,8 +91,8 @@ class ServerManager:
         # Kill any existing vllm serve processes
         self._kill_existing_servers()
 
-        # Ensure log directory exists before writing server.log
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure log directory exists before writing server.log (handles str or Path)
+        Path(self.server_log_path).parent.mkdir(parents=True, exist_ok=True)
 
         # Build command
         cmd = self._build_server_args()
